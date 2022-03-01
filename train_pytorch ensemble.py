@@ -1,0 +1,84 @@
+from sumo_env import SumoEnv
+from agents import ensembleDQNAgent, ReplayBuffer, Epsilon_greedy_policy, Ensemble_test_policy
+from utils import get_options, set_path, write_logs, plot_scores
+import os
+import torch
+import numpy as np
+from collections import deque
+
+if __name__ == "__main__":
+    options = get_options("train")
+    agent_type = options.agent
+    path = set_path(agent_type)
+    # start sumo env
+    env = SumoEnv(mode="train", log_path=path["log_path"], nogui=options.nogui)
+    state = env.start()
+    # initialise
+    episodes = [i for i in range(100000)]
+    scores = []
+    scores_window = deque(maxlen=100)
+    total_step = 0
+    actions = [-2.5, -1.5, 0.0, 1.5, 2.5]
+    number_of_nets = 10
+    safety_threshold = 2
+    fallback_action = 0
+    # Replay memory
+    memory = ReplayBuffer(action_size=len(actions), buffer_size = int(1e5), batch_size= 64, seed=0)
+    # Identify policy
+    train_policy=Epsilon_greedy_policy(action_size=len(actions))
+    test_policy=Ensemble_test_policy(saftety_threshold=None, fallback_action=None)
+    # generate models
+    agent=ensembleDQNAgent(state_size=len(state), action_size=len(actions), memory=memory,train_policy=train_policy, test_policy=test_policy, seed=0)
+
+    write_logs(file_path=path["agent_log_path"],
+               data=["total_step", "episode", "step", "state", "action", "next state", "reward", "return", "epsilon", "done","is_collided", "coef_of_var", "average score"])
+    write_logs(file_path=path["loss_log_path"],
+               data=["loss"])
+    print("\nstart training " + agent_type + " agent:\n")
+    # run episode
+    for episode in episodes:
+        active_model = np.random.randint(number_of_nets) # choose a arbitrary active model from models [0,10)
+        score = 0
+        state = env.reset()
+        step = 0
+
+        while True:
+            action, coef_of_var= agent.act_train(state, active_model)
+            next_state, reward, done, is_collided = env.step(actions[action])
+            agent.step(state, action, reward, done, coef_of_var)
+            state = next_state
+            score += reward
+            step += 1
+            total_step +=1
+            # save agent and loss logs
+            write_logs(file_path=path["agent_log_path"],
+                       data=[total_step, episode, step, state, actions[action], next_state, reward, score, agent.policy.eps, done, is_collided, coef_of_var])
+            if len(agent.loss):
+                write_logs(file_path=path["loss_log_path"], data=[agent.loss[-1]])
+            if done:
+                break
+
+        scores.append(score)
+        scores_window.append(score)
+        agent.policy.epsilon_decay() # let epsilon decay from 1 to 0.01
+        # show recent mean score; when the scores reach 350, save weights and end training
+        if episode % 100 == 0:
+            print('\rEpisode {}\tAverage Score: {:.2f}'.format(episode +1, np.mean(scores_window)))
+            write_logs(file_path=path["agent_log_path"],data=[total_step, episode, step, state, actions[action], next_state, reward, score, agent.policy.eps, done, is_collided, coef_of_var, np.mean(scores_window)])
+            for i in range(number_of_nets):
+                torch.save(agent.qnetworks_local[i].state_dict(),
+                           os.path.join(path["model_path"], "checkpoint_episode_" + str(episode) + "_score_{:.2f}".format(
+                               np.mean(scores_window)) + "_ensemble_"+ str(i) +".pth"))
+        # if total_step >= 500:
+        #     break
+
+        if np.mean(scores_window) > 350 and episode >= 100:
+            print('\nEnvironment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(episode +1,
+                                                                                         np.mean(scores_window)))
+            for i in range(number_of_nets):
+                torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "Final_checkpoint_episode_"+ str(episode) +"_ensemble_"+ str(i) +".pth"))
+            break
+
+    print("\nTraining ended.")
+    plot_scores([i for i in range(episode + 1)], scores, average=100, path=path["graph_path"])
+    env.close()
