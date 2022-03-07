@@ -307,6 +307,11 @@ class Confidence_Based_Replay_Buffer:
         self.dones = deque(maxlen=buffer_size)
         self.states = deque(maxlen=buffer_size)
         self.coef_of_vars = deque(maxlen=buffer_size)
+        ######################################################
+        # append some big values in the Cv value list,to check if the update function goes well
+        # for i in range(4):
+        #     self.coef_of_vars.append(1000)
+        ######################################################
 
     def append(self, state, action, reward, done, coef_of_var):
 
@@ -327,12 +332,16 @@ class Confidence_Based_Replay_Buffer:
         self.rewards.append(reward)
         self.dones.append(done)
         self.coef_of_vars.append(coef_of_var)
-        # if len(self.states) >= self.batch_size:
-        #     for i in range(len(self.states)):
-        #         if self.states[i]==state and self.actions[i]==action:# if state-action pair exited already in memory, coef_of_var should be updated
-        #             self.coef_of_vars[i]=coef_of_var
-        #
-
+        # self.coef_of_vars.append(1) # append 1 as new value in the Cv value list,to check if the update function goes well
+        ####################################################################################################
+        # try to select the state-action pair, which already appeared in replay memory, to update their Cv values
+        if len(self.states) >= self.batch_size:
+            for i in range(len(self.states)-1):
+                if self.states[i]==state and self.actions[i]==action:# if state-action pair exited already in memory, coef_of_var should be updated
+                    print('the same state-action found, old Cv will be updated')
+                    print('In step {:d} the state-action pair was the same'.format(i+1))
+                    self.coef_of_vars[i]=coef_of_var
+        ####################################################################################################
 
 
     def sample_batch_idxs(self, net, batch_size):
@@ -358,6 +367,8 @@ class Confidence_Based_Replay_Buffer:
         priorities = np.array(priorities)
         ######################################################################
         sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
+        # print('sample_transition_prob is',sample_transition_prob)
+        # print('toal probability is',sum(sample_transition_prob))
         ref_idxs = np.random.choice(memory_size, size=batch_size, p=sample_transition_prob)
         batch_idxs = [self.index_refs[net][idx] for idx in ref_idxs]
         assert len(batch_idxs) == batch_size

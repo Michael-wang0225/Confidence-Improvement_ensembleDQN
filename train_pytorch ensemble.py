@@ -22,7 +22,7 @@ if __name__ == "__main__":
     total_step = 0
     num_collision = 0
     actions = [-2.5, -1.5, 0.0, 1.5, 2.5]
-    BUFFER_SIZE = 15000  # buffer size
+    BUFFER_SIZE = 10000  # buffer size
     BATCH_SIZE = 64  # minibatch size
     number_of_nets = 10
     safety_threshold = 2
