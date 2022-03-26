@@ -1,3 +1,5 @@
+import pandas as pd
+
 from sumo_env import SumoEnv
 from agents import ensembleDQNAgent, Confidence_Based_Replay_Buffer, Replay_Buffer,Prioritized_Replay_Buffer, Epsilon_greedy_policy, Ensemble_test_policy
 from utils import get_options, set_path, write_logs, plot_scores
@@ -6,6 +8,7 @@ import torch
 import numpy as np
 from collections import deque
 import datetime
+import csv
 
 if __name__ == "__main__":
     options = get_options("train")
@@ -19,6 +22,7 @@ if __name__ == "__main__":
     episodes = [i for i in range(100000)]
     scores = []
     scores_window = deque(maxlen=100)
+    num_collision_window = deque(maxlen=100)
     total_step = 0
     num_collision = 0
     actions = [-2.5, -1.5, 0.0, 1.5, 2.5]
@@ -38,7 +42,7 @@ if __name__ == "__main__":
     agent=ensembleDQNAgent(state_size=len(state), action_size=len(actions), memory=memory_CBRB,train_policy=train_policy, test_policy=test_policy, seed=0)
 
     write_logs(file_path=path["agent_log_path"],
-               data=["total_step", "episode", "step", "state", "action", "next state", "reward", "return", "epsilon", "done","is_collided", "num_collision", "coef_of_var",  "average score"])
+               data=["total_step", "episode", "step", "state", "action", "next state", "reward", "return", "epsilon", "done","is_collided", "num_collision", "coef_of_var", "average score","success_rate"])
     write_logs(file_path=path["loss_log_path"],
                data=["loss"])
     print("\nstart training " + agent_type + " agent:\n")
@@ -47,6 +51,7 @@ if __name__ == "__main__":
         active_model = np.random.randint(number_of_nets) # choose a arbitrary active model from models [0,10)
         score = 0
         state = env.reset()
+        is_collided = False
         step = 0
 
         while True:
@@ -60,6 +65,9 @@ if __name__ == "__main__":
             if is_collided == True:
                 num_collision += 1
             # save agent and loss logs
+            # with open("transition_prob_CBRB.csv", 'a+', newline='') as f:
+            #     mywrite = csv.writer(f)
+            #     mywrite.writerow(agent.memory.sample_transition_prob)
             write_logs(file_path=path["agent_log_path"],
                        data=[total_step, episode, step, state, actions[action], next_state, reward, score, agent.policy.eps, done, is_collided, num_collision, coef_of_var])
             if len(agent.loss):
@@ -69,9 +77,17 @@ if __name__ == "__main__":
 
         # scores.append(score)
         scores_window.append(score)
-        write_logs(file_path=path["agent_log_path"],
-                   data=[total_step, episode, step, state, actions[action], next_state, reward, score, agent.policy.eps,
-                         done, is_collided, num_collision, coef_of_var, np.mean(scores_window)])
+        num_collision_window.append(num_collision)
+        if episode <=99:
+            write_logs(file_path=path["agent_log_path"],
+                       data=[total_step, episode, step, state, actions[action], next_state, reward, score, agent.policy.eps,
+                             done, is_collided, num_collision, coef_of_var, np.mean(scores_window), 1-(num_collision_window[episode]-num_collision_window[0])/100])
+        else:
+            write_logs(file_path=path["agent_log_path"],
+                       data=[total_step, episode, step, state, actions[action], next_state, reward, score,
+                             agent.policy.eps,
+                             done, is_collided, num_collision, coef_of_var, np.mean(scores_window),
+                             1 - (num_collision_window[99] - num_collision_window[0]) / 100])
         agent.policy.epsilon_decay() # let epsilon decay from 1 to 0.01
         # show recent mean score; when the scores reach 350, save weights and end training
         if episode % 100 == 0:
@@ -82,16 +98,32 @@ if __name__ == "__main__":
                                np.mean(scores_window)) + "_ensemble_"+ str(i) +".pth"))
         # if total_step >= 500:
         #     break
-        if episode >=2000:
+
+        if np.mean(scores_window) > 250 and episode >= 100:
+            print('\nSave weights in {:d} episodes!\tAverage Score: {:.2f}'.format(episode +1,
+                                                                                         np.mean(scores_window)))
+            for i in range(number_of_nets):
+                torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "High_score_checkpoint_episode_"+ str(episode) + "_score_{:.2f}".format(
+                               np.mean(scores_window)) +"_ensemble_"+ str(i) +".pth"))
+
+        if episode >= 99 and (1 - (num_collision_window[99] - num_collision_window[0]) / 100) >= 0.9:
+            print('\nSave weights in {:d} episodes!\tSuccess rate per 100 episodes: {:.2f}'.format(episode + 1,
+                                                                                   1 - (num_collision_window[99] - num_collision_window[0]) / 100))
+            for i in range(number_of_nets):
+                torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "High_success_rate_checkpoint_episode_"+ str(episode) + "_success_rate_{:.2f}".format(
+                               1 - (num_collision_window[99] - num_collision_window[0]) / 100) +"_ensemble_"+ str(i) +".pth"))
+
+        if episode >=10000:
             print('\nTrained {:d} episodes'.format(episode +1))
             break
 
-        if np.mean(scores_window) > 350 and episode >= 100:
-            print('\nEnvironment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(episode +1,
-                                                                                         np.mean(scores_window)))
-            for i in range(number_of_nets):
-                torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "Final_checkpoint_episode_"+ str(episode) +"_ensemble_"+ str(i) +".pth"))
-            break
+
+        # if np.mean(scores_window) > 350 and episode >= 100:
+        #     print('\nEnvironment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(episode +1,
+        #                                                                                  np.mean(scores_window)))
+        #     for i in range(number_of_nets):
+        #         torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "Final_checkpoint_episode_"+ str(episode) +"_ensemble_"+ str(i) +".pth"))
+        #     break
 
     print("\nTraining ended.")
 

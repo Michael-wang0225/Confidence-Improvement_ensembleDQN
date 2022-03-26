@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import dgl
+import csv
 
 
 GAMMA = 0.99  # discount factor
@@ -301,6 +302,9 @@ class Confidence_Based_Replay_Buffer:
         self.alpha = 1.0
         self.beta = 0.01
         self.beta_increment_per_sampling = 1.00001 # After 460519 steps, beta will be incresed to 1.0
+        # self.deufalt_pri= 1
+
+        self.sample_transition_prob= []
 
         self.actions = deque(maxlen=buffer_size)
         self.rewards = deque(maxlen=buffer_size)
@@ -319,7 +323,7 @@ class Confidence_Based_Replay_Buffer:
         # #####################################################################################################
         # intent of self.index_refs will be created
         if self.nb_entries < self.limit:   # One more entry will be added after this loop
-            # There should be enough experiences before the chosen sample to fill the window length + 1
+            # There should be enough experiences before the chosen sample to fill the window length + 1, windows length: How many historic states to include (1 uses only current state)
             if self.nb_entries > 2:
                 for i in range(self.number_of_nets):
                     if np.random.rand() < self.adding_prob:
@@ -363,19 +367,45 @@ class Confidence_Based_Replay_Buffer:
         #因为不是所有的index都加进来了，所以需要把加进去的index先选出来，再通过index把相应的coef_of_var提取出来，加入priorities里
         priorities = []
         for i in range(memory_size):
-            priorities.append(self.coef_of_vars[self.index_refs[net][i]]+1) #to avoid probability=0, so add one
+            # priorities.append(self.coef_of_vars[self.index_refs[net][i]]+1) #to avoid probability=0, so add one
+            if 0 <= self.coef_of_vars[self.index_refs[net][i]] < 0.1:
+                priorities.append(1)
+            elif 0.1 <= self.coef_of_vars[self.index_refs[net][i]] < 0.2:
+                priorities.append(1.2)
+            elif 0.2 <= self.coef_of_vars[self.index_refs[net][i]] < 0.3:
+                priorities.append(1.4)
+            elif 0.3 <= self.coef_of_vars[self.index_refs[net][i]] < 0.4:
+                priorities.append(1.6)
+            elif 0.4 <= self.coef_of_vars[self.index_refs[net][i]] < 0.5:
+                priorities.append(1.8)
+            elif 0.5 <= self.coef_of_vars[self.index_refs[net][i]] < 0.6:
+                priorities.append(2)
+            elif 0.6 <= self.coef_of_vars[self.index_refs[net][i]] < 0.7:
+                priorities.append(2.2)
+            elif 0.7 <= self.coef_of_vars[self.index_refs[net][i]] < 0.8:
+                priorities.append(2.4)
+            elif 0.8 <= self.coef_of_vars[self.index_refs[net][i]] < 0.9:
+                priorities.append(2.6)
+            elif 0.9 <= self.coef_of_vars[self.index_refs[net][i]] < 1:
+                priorities.append(2.8)
+            elif 1 <= self.coef_of_vars[self.index_refs[net][i]] < 10:
+                priorities.append(3)
+            elif 10 <= self.coef_of_vars[self.index_refs[net][i]] < 100:
+                priorities.append(5)
+            else:
+                priorities.append(8)
         priorities = np.array(priorities)
         ######################################################################
-        sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
+        self.sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
         # print('sample_transition_prob is',sample_transition_prob)
         # print('toal probability is',sum(sample_transition_prob))
-        ref_idxs = np.random.choice(memory_size, size=batch_size, p=sample_transition_prob)
+        ref_idxs = np.random.choice(memory_size, size=batch_size, p=self.sample_transition_prob)
         batch_idxs = [self.index_refs[net][idx] for idx in ref_idxs]
         assert len(batch_idxs) == batch_size
 
         self.beta = np.min([1., self.beta * self.beta_increment_per_sampling])
 
-        importance_sample_weights = torch.from_numpy(np.power(memory_size * sample_transition_prob, -self.beta)).float().to(device)
+        importance_sample_weights = torch.from_numpy(np.power(memory_size * self.sample_transition_prob, -self.beta)).float().to(device)
 
         return batch_idxs, importance_sample_weights
 
@@ -625,6 +655,8 @@ class Prioritized_Replay_Buffer:
         self.beta = 0.01
         self.beta_increment_per_sampling = 1.00001 # After 460519 steps, beta will be incresed to 1.0
 
+        self.sample_transition_prob = []
+
         self.actions = deque(maxlen=buffer_size)
         self.rewards = deque(maxlen=buffer_size)
         self.dones = deque(maxlen=buffer_size)
@@ -636,10 +668,10 @@ class Prioritized_Replay_Buffer:
 
         if self.nb_entries < self.limit:   # One more entry will be added after this loop
             # There should be enough experiences before the chosen sample to fill the window length + 1
-            if self.nb_entries > 2:
+            if self.nb_entries > 2: # self.nb_entries = len(self.states)
                 for i in range(self.number_of_nets):
                     if np.random.rand() < self.adding_prob:
-                        self.index_refs[i].append(self.nb_entries)
+                        self.index_refs[i].append(self.nb_entries) # self.nb_entries = len(self.states)
 
         self.states.append(state)
         self.actions.append(action)
@@ -670,14 +702,14 @@ class Prioritized_Replay_Buffer:
             priorities.append(self.priorities[self.index_refs[net][i]])
         priorities = np.array(priorities)
         ######################################################################
-        sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
-        ref_idxs = np.random.choice(memory_size, size=batch_size, p=sample_transition_prob)
+        self.sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
+        ref_idxs = np.random.choice(memory_size, size=batch_size, p=self.sample_transition_prob)
         batch_idxs = [self.index_refs[net][idx] for idx in ref_idxs]
         assert len(batch_idxs) == batch_size
 
         self.beta = np.min([1., self.beta * self.beta_increment_per_sampling])
 
-        importance_sample_weights = torch.from_numpy(np.power(memory_size * sample_transition_prob, -self.beta)).float().to(device)
+        importance_sample_weights = torch.from_numpy(np.power(memory_size * self.sample_transition_prob, -self.beta)).float().to(device)
 
         return batch_idxs, importance_sample_weights
 
