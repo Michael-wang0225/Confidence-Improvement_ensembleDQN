@@ -8,6 +8,7 @@ from models import QNetwork
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+from SumTree import SumTree
 import dgl
 import csv
 
@@ -142,11 +143,37 @@ class ensembleDQNAgent():
 
         return action, info
 
+    def calulate_TD_error(self, state, next_state, action, reward, done, active_model):
+
+        state=torch.FloatTensor(state).to(device)
+        next_state=torch.FloatTensor(next_state).to(device)
+        Q_target_next = self.qnetworks_target[active_model](next_state).max().cpu().data.numpy()
+
+        # Q_target_next = self.qnetworks_target[active_model](next_state).detach().max(1)[0].unsqueeze(1)
+        # print(done)
+        # print(reward)
+        if done:
+            Q_target = reward
+        else:
+            Q_target = (reward + (GAMMA * Q_target_next))
+        # print('Q_target_next is', Q_target_next)
+        # print('reward is',reward)
+        # print('Q_target is',Q_target)
+        Q_expected = self.qnetworks_local[active_model](state)[action].cpu().data.numpy()
+        # print('Q_expected is',Q_expected)
+        error = abs(Q_expected - Q_target)
+        # print('error is',error)
+        return error
 
 
-    def step(self, state, action, reward, done, coef_of_var):
-        # Save experience in replay memory
-        self.memory.append(state, action, reward, done, coef_of_var)
+    def step(self, state, next_state, action, reward, done, coef_of_var, active_model):
+        if self.prioritized:
+            # calculate TD error
+            error= self.calulate_TD_error(state, next_state, action, reward, done, active_model)
+            # Save experience in replay memory
+            self.memory.append(state, action, reward, done, coef_of_var, error)
+        else:
+            self.memory.append(state, action, reward, done, coef_of_var)
         if self.enough_samples == False:
             has_enough_data = [False for i in range(number_of_nets)]
             flag = True
@@ -169,7 +196,7 @@ class ensembleDQNAgent():
 
     def learn_single_net(self, active_net, gamma):
         if self.prioritized or self.confidence_based:
-            experiences, importance_sample_weights, batch_idxs = self.memory.sample(active_net, self.batch_size)
+            experiences, importance_sample_weights, batch_tree_idxs = self.memory.sample(active_net, self.batch_size)
         else:
             experiences = self.memory.sample(active_net, self.batch_size)
         assert len(experiences) == self.batch_size
@@ -209,12 +236,17 @@ class ensembleDQNAgent():
         Q_expected = self.qnetworks_local[active_net](state_batch).gather(1, action_batch)
 
         if self.confidence_based or self.prioritized:
-            loss = self.weighted_loss(importance_sample_weights, Q_expected, Q_targets)
-            if self.prioritized: # update self.default_priority
-                priorities = torch.abs(Q_targets - Q_expected) + 1.
-                priorities = priorities.squeeze(1).cpu().data.numpy()
-                # print(len(priorities))
-                self.memory.update(batch_idxs, priorities)
+            loss = ((torch.FloatTensor(importance_sample_weights).to(device)) * F.mse_loss(Q_expected, Q_targets)).mean()
+            if self.prioritized: # update priority
+                errors = torch.abs(Q_targets - Q_expected).squeeze(1).cpu().data.numpy()
+                print('errors:',errors)
+                print('len(errors)',len(errors))
+                # update priority
+                for i in range(self.batch_size):
+                    tree_idx = batch_tree_idxs[i]
+                    self.memory.update(active_net, tree_idx, errors[i])
+            else:
+                self.update_cv_value(active_net, batch_tree_idxs, state_batch, action_batch)
         else:
             loss = F.mse_loss(Q_expected, Q_targets)
         # Minimize the loss
@@ -225,23 +257,25 @@ class ensembleDQNAgent():
         # ------------------- update target network ------------------- #
         self.soft_update(self.qnetworks_local[active_net], self.qnetworks_target[active_net], TAU)
 
-        # ------------------- update coef_of_var of the chosen samples ------------------- #
-        # self.update_cv_value(batch_idxs,state_batch,action_batch)
 
-    def update_cv_value(self,batch_idxs,state_batch,action_batch):
 
-        for i in range(len(batch_idxs)):
-            state=state_batch[i]
-            action=action_batch[i]
-            new_cv_value=self.forward_cv_value(state,action)
+
+    def update_cv_value(self, active_net, batch_tree_idxs, state_batch, action_batch):
+
+        for i in range(len(batch_tree_idxs)):
+            state = state_batch[i]
+            action = action_batch[i]
+            new_cv_value = self.forward_cv_value(state, action)
             # print(new_cv_value)
-            self.memory.coef_of_vars[batch_idxs[i]]=new_cv_value
+            tree_idx = batch_tree_idxs[i]
+            self.memory.update(active_net, tree_idx, new_cv_value)
 
     def forward_cv_value(self, state, action):
         """Returns the coefficient of variation for given state and action.
 
         """
         q_values_all_nets = []
+        state = torch.tensor(state).float().unsqueeze(0).to(device)
         for net in range(number_of_nets):
             self.qnetworks_local[net].eval()
             with torch.no_grad():
@@ -256,11 +290,11 @@ class ensembleDQNAgent():
 
         return coef_of_var
 
-    def weighted_loss(self, weights, inputs, targets):
-        t = torch.abs(inputs - targets)
-        zi = torch.where(t < 1, 0.5 * t ** 2, t - 0.5)
-        loss = (weights * zi).sum()
-        return loss
+    # def weighted_loss(self, weights, inputs, targets):
+    #     t = torch.abs(inputs - targets)
+    #     zi = torch.where(t < 1, 0.5 * t ** 2, t - 0.5)
+    #     loss = (weights * zi).sum()
+    #     return loss
 
 
     def soft_update(self, local_model, target_model, tau):
@@ -299,23 +333,27 @@ class Confidence_Based_Replay_Buffer:
         self.number_of_nets = number_of_nets
         self.adding_prob = adding_prob
         self.index_refs = [[] for i in range(self.number_of_nets)]
-        self.alpha = 1.0
-        self.beta = 0.01
-        self.beta_increment_per_sampling = 1.00001 # After 460519 steps, beta will be incresed to 1.0
-        # self.deufalt_pri= 1
+        self.tree = [SumTree(int(self.limit / 2)) for i in range(self.number_of_nets)]
 
-        self.sample_transition_prob= []
+        self.PER_e = 0.01  # Hyperparameter that we use to avoid some experiences to have 0 probability of being taken
+        self.PER_a = 0.6  # Hyperparameter that we use to make a tradeoff between taking only experience with high priority and sampling randomly
+        self.beta = 0.4  # importance-sampling, from initial value increasing to 1
+        self.beta_increment_per_sampling = 0.001
+
 
         self.actions = deque(maxlen=buffer_size)
         self.rewards = deque(maxlen=buffer_size)
         self.dones = deque(maxlen=buffer_size)
         self.states = deque(maxlen=buffer_size)
-        self.coef_of_vars = deque(maxlen=buffer_size)
+        # self.coef_of_vars = deque(maxlen=buffer_size)
+        self.priorities = deque(maxlen=buffer_size)
         ######################################################
         # append some big values in the Cv value list,to check if the update function goes well
         # for i in range(4):
         #     self.coef_of_vars.append(1000)
         ######################################################
+    def _get_priority(self, error):
+        return (np.abs(error) + self.PER_e) ** self.PER_a
 
     def append(self, state, action, reward, done, coef_of_var):
 
@@ -327,7 +365,8 @@ class Confidence_Based_Replay_Buffer:
             if self.nb_entries > 2:
                 for i in range(self.number_of_nets):
                     if np.random.rand() < self.adding_prob:
-                        self.index_refs[i].append(self.nb_entries)
+                        self.index_refs[i].append(self.nb_entries-1)
+                        self.tree[i].add(self.priorities[self.nb_entries - 1])
 
         # Append state, action, reward, done, coef_of_var into memory
         ####################################################################################################
@@ -335,16 +374,20 @@ class Confidence_Based_Replay_Buffer:
         self.actions.append(action)
         self.rewards.append(reward)
         self.dones.append(done)
-        self.coef_of_vars.append(coef_of_var)
+        # self.coef_of_vars.append(coef_of_var)
+        if coef_of_var <=1:
+            self.priorities.append(self._get_priority(coef_of_var))
+        else:
+            self.priorities.append(self._get_priority(2))
         # self.coef_of_vars.append(1) # append 1 as new value in the Cv value list,to check if the update function goes well
         ####################################################################################################
         # try to select the state-action pair, which already appeared in replay memory, to update their Cv values
-        if len(self.states) >= self.batch_size:
-            for i in range(len(self.states)-1):
-                if self.states[i]==state and self.actions[i]==action:# if state-action pair exited already in memory, coef_of_var should be updated
-                    print('the same state-action found, old Cv will be updated')
-                    print('In step {:d} the state-action pair was the same'.format(i+1))
-                    self.coef_of_vars[i]=coef_of_var
+        # if len(self.states) >= self.batch_size:
+        #     for i in range(len(self.states)-1):
+        #         if self.states[i]==state and self.actions[i]==action:# if state-action pair exited already in memory, coef_of_var should be updated
+        #             print('the same state-action found, old Cv will be updated')
+        #             print('In step {:d} the state-action pair was the same'.format(i+1))
+        #             self.coef_of_vars[i]=coef_of_var
         ####################################################################################################
 
 
@@ -364,50 +407,70 @@ class Confidence_Based_Replay_Buffer:
         if batch_size > memory_size:
             warnings.warn("Less samples in memory than batch size.")
         ######################################################################
-        #因为不是所有的index都加进来了，所以需要把加进去的index先选出来，再通过index把相应的coef_of_var提取出来，加入priorities里
-        priorities = []
-        for i in range(memory_size):
-            # priorities.append(self.coef_of_vars[self.index_refs[net][i]]+1) #to avoid probability=0, so add one
-            if 0 <= self.coef_of_vars[self.index_refs[net][i]] < 0.1:
-                priorities.append(1)
-            elif 0.1 <= self.coef_of_vars[self.index_refs[net][i]] < 0.2:
-                priorities.append(1.2)
-            elif 0.2 <= self.coef_of_vars[self.index_refs[net][i]] < 0.3:
-                priorities.append(1.4)
-            elif 0.3 <= self.coef_of_vars[self.index_refs[net][i]] < 0.4:
-                priorities.append(1.6)
-            elif 0.4 <= self.coef_of_vars[self.index_refs[net][i]] < 0.5:
-                priorities.append(1.8)
-            elif 0.5 <= self.coef_of_vars[self.index_refs[net][i]] < 0.6:
-                priorities.append(2)
-            elif 0.6 <= self.coef_of_vars[self.index_refs[net][i]] < 0.7:
-                priorities.append(2.2)
-            elif 0.7 <= self.coef_of_vars[self.index_refs[net][i]] < 0.8:
-                priorities.append(2.4)
-            elif 0.8 <= self.coef_of_vars[self.index_refs[net][i]] < 0.9:
-                priorities.append(2.6)
-            elif 0.9 <= self.coef_of_vars[self.index_refs[net][i]] < 1:
-                priorities.append(2.8)
-            elif 1 <= self.coef_of_vars[self.index_refs[net][i]] < 10:
-                priorities.append(3)
-            elif 10 <= self.coef_of_vars[self.index_refs[net][i]] < 100:
-                priorities.append(5)
-            else:
-                priorities.append(8)
-        priorities = np.array(priorities)
+        # #因为不是所有的index都加进来了，所以需要把加进去的index先选出来，再通过index把相应的coef_of_var提取出来，加入priorities里
+        # priorities = []
+        # for i in range(memory_size):
+        #     # priorities.append(self.coef_of_vars[self.index_refs[net][i]]+1) #to avoid probability=0, so add one
+        #     if 0 <= self.coef_of_vars[self.index_refs[net][i]] < 0.1:
+        #         priorities.append(1)
+        #     elif 0.1 <= self.coef_of_vars[self.index_refs[net][i]] < 0.2:
+        #         priorities.append(1.2)
+        #     elif 0.2 <= self.coef_of_vars[self.index_refs[net][i]] < 0.3:
+        #         priorities.append(1.4)
+        #     elif 0.3 <= self.coef_of_vars[self.index_refs[net][i]] < 0.4:
+        #         priorities.append(1.6)
+        #     elif 0.4 <= self.coef_of_vars[self.index_refs[net][i]] < 0.5:
+        #         priorities.append(1.8)
+        #     elif 0.5 <= self.coef_of_vars[self.index_refs[net][i]] < 0.6:
+        #         priorities.append(2)
+        #     elif 0.6 <= self.coef_of_vars[self.index_refs[net][i]] < 0.7:
+        #         priorities.append(2.2)
+        #     elif 0.7 <= self.coef_of_vars[self.index_refs[net][i]] < 0.8:
+        #         priorities.append(2.4)
+        #     elif 0.8 <= self.coef_of_vars[self.index_refs[net][i]] < 0.9:
+        #         priorities.append(2.6)
+        #     elif 0.9 <= self.coef_of_vars[self.index_refs[net][i]] < 1:
+        #         priorities.append(2.8)
+        #     elif 1 <= self.coef_of_vars[self.index_refs[net][i]] < 10:
+        #         priorities.append(3)
+        #     elif 10 <= self.coef_of_vars[self.index_refs[net][i]] < 100:
+        #         priorities.append(5)
+        #     else:
+        #         priorities.append(8)
+        # priorities = np.array(priorities)
         ######################################################################
-        self.sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
-        # print('sample_transition_prob is',sample_transition_prob)
-        # print('toal probability is',sum(sample_transition_prob))
-        ref_idxs = np.random.choice(memory_size, size=batch_size, p=self.sample_transition_prob)
-        batch_idxs = [self.index_refs[net][idx] for idx in ref_idxs]
-        assert len(batch_idxs) == batch_size
+        # self.sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
+        # # print('sample_transition_prob is',sample_transition_prob)
+        # # print('toal probability is',sum(sample_transition_prob))
+        # ref_idxs = np.random.choice(memory_size, size=batch_size, p=self.sample_transition_prob)
+        # batch_idxs = [self.index_refs[net][idx] for idx in ref_idxs]
+        # assert len(batch_idxs) == batch_size
+        #
+        # self.beta = np.min([1., self.beta * self.beta_increment_per_sampling])
+        #
+        # importance_sample_weights = torch.from_numpy(np.power(memory_size * self.sample_transition_prob, -self.beta)).float().to(device)
+        segment = self.tree[net].total() / batch_size
+        self.beta = np.min([1., self.beta + self.beta_increment_per_sampling])
+        batch_idxs = []
+        batch_tree_idxs = []
+        priorities = []
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+            s = random.uniform(a, b)
+            p, dataIdx, idx = self.tree[net].get(s)
+            priorities.append(p)
+            # print('dataIdx is',dataIdx)
+            # print('len(index_refs) is',len(self.index_refs[net]))
+            batch_idxs.append(self.index_refs[net][dataIdx])
+            # print('len(batch_idxs) is',len(batch_idxs))
+            batch_tree_idxs.append(idx)
 
-        self.beta = np.min([1., self.beta * self.beta_increment_per_sampling])
+        sampling_probabilities = priorities / self.tree[net].total()
+        is_weight = np.power(self.tree[net].n_entries * sampling_probabilities, -self.beta)
+        is_weight /= is_weight.max()
 
-        importance_sample_weights = torch.from_numpy(np.power(memory_size * self.sample_transition_prob, -self.beta)).float().to(device)
-
-        return batch_idxs, importance_sample_weights
+        return batch_idxs, is_weight, batch_tree_idxs
 
 
 
@@ -434,7 +497,7 @@ class Confidence_Based_Replay_Buffer:
         Experience = namedtuple('Experience', 'state, action, reward, next_state, done')
 
         # Sample random indexes for the specified ensemble member
-        batch_idxs, importance_sample_weights = self.sample_batch_idxs(net, batch_size)
+        batch_idxs, importance_sample_weights, batch_tree_idxs = self.sample_batch_idxs(net, batch_size)
 
         assert np.min(batch_idxs) >= 2
         assert np.max(batch_idxs) < self.nb_entries
@@ -448,7 +511,7 @@ class Confidence_Based_Replay_Buffer:
                 # Skip this transition because the environment was reset here. Select a new, random
                 # transition and use this instead. This may cause the batch to contain the same
                 # transition twice.
-                index, _ = self.sample_batch_idxs(net, 1)
+                index, _, _ = self.sample_batch_idxs(net, 1)
                 idx=index[0]
                 terminal0 = self.dones[idx - 2]
             assert 2 <= idx < self.nb_entries
@@ -472,7 +535,11 @@ class Confidence_Based_Replay_Buffer:
             experiences.append(Experience(state=state0, action=action, reward=reward,
                                           next_state=state1, done=terminal1))
         assert len(experiences) == batch_size
-        return experiences, importance_sample_weights, batch_idxs
+        return experiences, importance_sample_weights, batch_tree_idxs
+
+    def update(self, net, tree_idx, error):
+        p = self._get_priority(error)
+        self.tree[net].update(tree_idx, p)
 
 
 
@@ -647,15 +714,19 @@ class Prioritized_Replay_Buffer:
         self.number_of_nets = number_of_nets
         self.adding_prob = adding_prob
         self.index_refs = [[] for i in range(self.number_of_nets)]
+        self.tree = [SumTree(int(self.limit/2)) for i in range(self.number_of_nets)]
 
-        self.default_priority = 1.0
+        self.PER_e = 0.01 # Hyperparameter that we use to avoid some experiences to have 0 probability of being taken
+        self.PER_a = 0.6 # Hyperparameter that we use to make a tradeoff between taking only experience with high priority and sampling randomly
+        self.beta = 0.4 # importance-sampling, from initial value increasing to 1
+        self.beta_increment_per_sampling = 0.001
 
-        # 定义采样和权重指数参数
-        self.alpha = 1.0
-        self.beta = 0.01
-        self.beta_increment_per_sampling = 1.00001 # After 460519 steps, beta will be incresed to 1.0
+        # # 定义采样和权重指数参数
+        # self.alpha = 1.0
+        # self.beta = 0.01
+        # self.beta_increment_per_sampling = 1.00001 # After 460519 steps, beta will be incresed to 1.0
 
-        self.sample_transition_prob = []
+        # self.sample_transition_prob = []
 
         self.actions = deque(maxlen=buffer_size)
         self.rewards = deque(maxlen=buffer_size)
@@ -664,21 +735,31 @@ class Prioritized_Replay_Buffer:
         self.coef_of_vars = deque(maxlen=buffer_size)
         self.priorities = deque(maxlen=buffer_size)
 
-    def append(self, state, action, reward, done, coef_of_var):
+    def _get_priority(self, error):
+        return (np.abs(error) + self.PER_e) ** self.PER_a
 
-        if self.nb_entries < self.limit:   # One more entry will be added after this loop
+    def append(self, state, action, reward, done, coef_of_var, error):
+
+        if self.nb_entries <= self.limit:   # One more entry will be added after this loop
             # There should be enough experiences before the chosen sample to fill the window length + 1
             if self.nb_entries > 2: # self.nb_entries = len(self.states)
                 for i in range(self.number_of_nets):
                     if np.random.rand() < self.adding_prob:
-                        self.index_refs[i].append(self.nb_entries) # self.nb_entries = len(self.states)
+                        self.index_refs[i].append(self.nb_entries-1) # self.nb_entries = len(self.states)
+                        # print('priority:',self.priorities)
+                        # print('adding priority',self.priorities[self.nb_entries-1])
+                        self.tree[i].add(self.priorities[self.nb_entries-1])
+                        # self.tree[i].add(self.priorities[self.index_refs[i][-1]])
 
         self.states.append(state)
         self.actions.append(action)
         self.rewards.append(reward)
         self.dones.append(done)
         self.coef_of_vars.append(coef_of_var)
-        self.priorities.append(self.default_priority)
+        self.priorities.append(self._get_priority(error)) # priority = self._get_priority(error)
+        # for i in range(number_of_nets):
+        #     if self.index_refs[i]:
+        #         self.tree[i].add(self.priorities[self.index_refs[i][-1]])
 
     def sample_batch_idxs(self, net, batch_size):
         """
@@ -695,23 +776,44 @@ class Prioritized_Replay_Buffer:
         assert memory_size > 2
         if batch_size > memory_size:
             warnings.warn("Less samples in memory than batch size.")
-        ######################################################################
-        #因为不是所有的index都加进来了，所以需要把加进去的index先选出来，再通过index把相应的self.default_priority提取出来，加入priorities里
+        # ######################################################################
+        # #因为不是所有的index都加进来了，所以需要把加进去的index先选出来，再通过index把相应的self.default_priority提取出来，加入priorities里
+        # priorities = []
+        # for i in range(memory_size):
+        #     priorities.append(self.priorities[self.index_refs[net][i]])
+        # priorities = np.array(priorities)
+        # ######################################################################
+        # self.sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
+        # ref_idxs = np.random.choice(memory_size, size=batch_size, p=self.sample_transition_prob)
+        # batch_idxs = [self.index_refs[net][idx] for idx in ref_idxs]
+        # assert len(batch_idxs) == batch_size
+        #
+        # self.beta = np.min([1., self.beta * self.beta_increment_per_sampling])
+        #
+        # importance_sample_weights = torch.from_numpy(np.power(memory_size * self.sample_transition_prob, -self.beta)).float().to(device)
+
+        segment = self.tree[net].total() / batch_size
+        self.beta = np.min([1., self.beta + self.beta_increment_per_sampling])
+        batch_idxs = []
+        batch_tree_idxs = []
         priorities = []
-        for i in range(memory_size):
-            priorities.append(self.priorities[self.index_refs[net][i]])
-        priorities = np.array(priorities)
-        ######################################################################
-        self.sample_transition_prob = np.power(priorities, self.alpha) / sum(np.power(priorities, self.alpha))
-        ref_idxs = np.random.choice(memory_size, size=batch_size, p=self.sample_transition_prob)
-        batch_idxs = [self.index_refs[net][idx] for idx in ref_idxs]
-        assert len(batch_idxs) == batch_size
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+            s = random.uniform(a, b)
+            p, dataIdx,idx = self.tree[net].get(s)
+            priorities.append(p)
+            # print('dataIdx is',dataIdx)
+            # print('len(index_refs) is',len(self.index_refs[net]))
+            batch_idxs.append(self.index_refs[net][dataIdx])
+            # print('len(batch_idxs) is',len(batch_idxs))
+            batch_tree_idxs.append(idx)
 
-        self.beta = np.min([1., self.beta * self.beta_increment_per_sampling])
+        sampling_probabilities = priorities / self.tree[net].total()
+        is_weight = np.power(self.tree[net].n_entries * sampling_probabilities, -self.beta)
+        is_weight /= is_weight.max()
 
-        importance_sample_weights = torch.from_numpy(np.power(memory_size * self.sample_transition_prob, -self.beta)).float().to(device)
-
-        return batch_idxs, importance_sample_weights
+        return batch_idxs , is_weight, batch_tree_idxs
 
     def sample(self, net, batch_size):
         """
@@ -736,7 +838,7 @@ class Prioritized_Replay_Buffer:
         Experience = namedtuple('Experience', 'state, action, reward, next_state, done')
 
         # Sample random indexes for the specified ensemble member
-        batch_idxs, importance_sample_weights = self.sample_batch_idxs(net, batch_size)
+        batch_idxs, importance_sample_weights, batch_tree_idxs = self.sample_batch_idxs(net, batch_size)
 
         assert np.min(batch_idxs) >= 2
         assert np.max(batch_idxs) < self.nb_entries
@@ -750,7 +852,7 @@ class Prioritized_Replay_Buffer:
                 # Skip this transition because the environment was reset here. Select a new, random
                 # transition and use this instead. This may cause the batch to contain the same
                 # transition twice.
-                index, _ = self.sample_batch_idxs(net, 1)
+                index, _, _ = self.sample_batch_idxs(net, 1)
                 idx = index[0]
                 terminal0 = self.dones[idx - 2]
             assert 2 <= idx < self.nb_entries
@@ -774,14 +876,11 @@ class Prioritized_Replay_Buffer:
             experiences.append(Experience(state=state0, action=action, reward=reward,
                                           next_state=state1, done=terminal1))
         assert len(experiences) == batch_size
-        return experiences, importance_sample_weights, batch_idxs
+        return experiences, importance_sample_weights, batch_tree_idxs
 
-    def update(self, batch_idxs, priorities):
-        for i in range(len(priorities)):
-            if priorities[i] >= self.default_priority:
-                self.default_priority = priorities[i]
-            self.priorities[batch_idxs[i]]= priorities[i]
-            # print('self.default_priority is',self.default_priority)
+    def update(self, net, tree_idx, error):
+        p = self._get_priority(error)
+        self.tree[net].update(tree_idx, p)
 
 
 

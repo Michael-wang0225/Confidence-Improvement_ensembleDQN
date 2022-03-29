@@ -26,7 +26,7 @@ if __name__ == "__main__":
     total_step = 0
     num_collision = 0
     actions = [-2.5, -1.5, 0.0, 1.5, 2.5]
-    BUFFER_SIZE = 10000  # buffer size
+    BUFFER_SIZE = 100000  # buffer size
     BATCH_SIZE = 64  # minibatch size
     number_of_nets = 10
     safety_threshold = 2
@@ -57,17 +57,19 @@ if __name__ == "__main__":
         while True:
             action, coef_of_var= agent.act_train(state, active_model)
             next_state, reward, done, is_collided = env.step(actions[action])
-            agent.step(state, action, reward, done, coef_of_var)
+            agent.step(state, next_state, action, reward, done, coef_of_var, active_model)
             state = next_state
             score += reward
             step += 1
             total_step +=1
             if is_collided == True:
                 num_collision += 1
-            # save agent and loss logs
+            ################################################################## test the possibility distribution,save in a additional csv file
             # with open("transition_prob_CBRB.csv", 'a+', newline='') as f:
             #     mywrite = csv.writer(f)
             #     mywrite.writerow(agent.memory.sample_transition_prob)
+            ###################################################################
+            # save agent and loss logs
             write_logs(file_path=path["agent_log_path"],
                        data=[total_step, episode, step, state, actions[action], next_state, reward, score, agent.policy.eps, done, is_collided, num_collision, coef_of_var])
             if len(agent.loss):
@@ -113,7 +115,7 @@ if __name__ == "__main__":
                 torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "High_success_rate_checkpoint_episode_"+ str(episode) + "_success_rate_{:.2f}".format(
                                1 - (num_collision_window[99] - num_collision_window[0]) / 100) +"_ensemble_"+ str(i) +".pth"))
 
-        if episode >=10000:
+        if episode >=40000:
             print('\nTrained {:d} episodes'.format(episode +1))
             break
 
