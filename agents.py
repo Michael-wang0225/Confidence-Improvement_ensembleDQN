@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from SumTree import SumTree
+import time
 import dgl
 import csv
 
@@ -69,6 +70,8 @@ class ensembleDQNAgent():
         print('Buffer size is',self.memory.limit)
         # Initialize time step (for updating every UPDATE_EVERY steps)
         self.t_step = 0
+        # Initialize update step for updating cv value
+        self.update_step = 0
         # Initialize select_action policy
         self.policy=train_policy
         self.test_policy=test_policy
@@ -167,6 +170,9 @@ class ensembleDQNAgent():
 
 
     def step(self, state, next_state, action, reward, done, coef_of_var, active_model):
+
+        # if self.update_step % 1000 ==0:
+        #     print('\n{:d} steps passed...\n'.format(self.update_step))
         if self.prioritized:
             # calculate TD error
             error= self.calulate_TD_error(state, next_state, action, reward, done, active_model)
@@ -190,11 +196,13 @@ class ensembleDQNAgent():
             # Learn every UPDATE_EVERY time steps.
             self.t_step = (self.t_step + 1) % UPDATE_EVERY
             if self.t_step == 0 and self.enough_samples:
+                self.update_step +=1
                 # If enough samples are available in memory, get random subset and learn
                 for active_net in range(number_of_nets):
                     self.learn_single_net(active_net, GAMMA)
 
     def learn_single_net(self, active_net, gamma):
+        # time_forward_start=time.clock()
         if self.prioritized or self.confidence_based:
             experiences, importance_sample_weights, batch_tree_idxs = self.memory.sample(active_net, self.batch_size)
         else:
@@ -239,14 +247,19 @@ class ensembleDQNAgent():
             loss = ((torch.FloatTensor(importance_sample_weights).to(device)) * F.mse_loss(Q_expected, Q_targets)).mean()
             if self.prioritized: # update priority
                 errors = torch.abs(Q_targets - Q_expected).squeeze(1).cpu().data.numpy()
-                print('errors:',errors)
-                print('len(errors)',len(errors))
+                # print('errors:',errors)
+                # print('len(errors):',len(errors))
                 # update priority
                 for i in range(self.batch_size):
                     tree_idx = batch_tree_idxs[i]
                     self.memory.update(active_net, tree_idx, errors[i])
             else:
-                self.update_cv_value(active_net, batch_tree_idxs, state_batch, action_batch)
+                # time_forward_start=time.clock()
+                if self.update_step % 3000 == 0:
+                    self.update_cv_based_priority(active_net, batch_tree_idxs, state_batch, action_batch)
+                    print('priority updated...')
+                # time_forward_end=time.clock()
+                # print('cv update time is:',time_forward_end-time_forward_start)
         else:
             loss = F.mse_loss(Q_expected, Q_targets)
         # Minimize the loss
@@ -257,30 +270,43 @@ class ensembleDQNAgent():
         # ------------------- update target network ------------------- #
         self.soft_update(self.qnetworks_local[active_net], self.qnetworks_target[active_net], TAU)
 
+        # time_forward_end=time.clock()
+        # print('one loop time is:',time_forward_end-time_forward_start)
 
 
-
-    def update_cv_value(self, active_net, batch_tree_idxs, state_batch, action_batch):
-
+    def update_cv_based_priority(self, active_net, batch_tree_idxs, state_batch, action_batch):
+        # time_forward_start=time.clock()
         for i in range(len(batch_tree_idxs)):
+            # time_forward_start=time.clock()
             state = state_batch[i]
             action = action_batch[i]
+            # time_forward_start=time.clock()
             new_cv_value = self.forward_cv_value(state, action)
+            # time_forward_end=time.clock()
+            # print('cv calculate time is:',time_forward_end-time_forward_start)
             # print(new_cv_value)
             tree_idx = batch_tree_idxs[i]
+            # time_forward_start=time.clock()
             self.memory.update(active_net, tree_idx, new_cv_value)
-
+            # time_forward_end=time.clock()
+            # print('one loop time is:',time_forward_end-time_forward_start)
+        # time_forward_end=time.clock()
+        # print('update cv time is:',time_forward_end-time_forward_start)
     def forward_cv_value(self, state, action):
         """Returns the coefficient of variation for given state and action.
 
         """
         q_values_all_nets = []
-        state = torch.tensor(state).float().unsqueeze(0).to(device)
+        state = state.clone().detach().float().unsqueeze(0).to(device)
+        # state = torch.tensor(state).float().unsqueeze(0).to(device)
         for net in range(number_of_nets):
+            # time_forward_start=time.clock()
             self.qnetworks_local[net].eval()
             with torch.no_grad():
                 action_values = self.qnetworks_local[net](state).cpu().data.numpy().flatten()
                 q_values_all_nets.append(action_values[action])
+            # time_forward_end=time.clock()
+            # print('one forward time is:',time_forward_end-time_forward_start)
 
         q_values_all_nets = np.array(q_values_all_nets)
 
@@ -375,19 +401,15 @@ class Confidence_Based_Replay_Buffer:
         self.rewards.append(reward)
         self.dones.append(done)
         # self.coef_of_vars.append(coef_of_var)
-        if coef_of_var <=1:
-            self.priorities.append(self._get_priority(coef_of_var))
-        else:
-            self.priorities.append(self._get_priority(2))
-        # self.coef_of_vars.append(1) # append 1 as new value in the Cv value list,to check if the update function goes well
-        ####################################################################################################
-        # try to select the state-action pair, which already appeared in replay memory, to update their Cv values
-        # if len(self.states) >= self.batch_size:
-        #     for i in range(len(self.states)-1):
-        #         if self.states[i]==state and self.actions[i]==action:# if state-action pair exited already in memory, coef_of_var should be updated
-        #             print('the same state-action found, old Cv will be updated')
-        #             print('In step {:d} the state-action pair was the same'.format(i+1))
-        #             self.coef_of_vars[i]=coef_of_var
+        ######################################################################################
+        # version 01: if cv bigger than 1, append 2. Otherwise append the original cv values
+        # if coef_of_var <=1:
+        #     self.priorities.append(self._get_priority(coef_of_var))
+        # else:
+        #     self.priorities.append(self._get_priority(2))
+        ######################################################################################
+        # version 02: directly append all the original cv values, but every 5000 steps the priority will be updated
+        self.priorities.append(self._get_priority(coef_of_var))
         ####################################################################################################
 
 
@@ -538,8 +560,11 @@ class Confidence_Based_Replay_Buffer:
         return experiences, importance_sample_weights, batch_tree_idxs
 
     def update(self, net, tree_idx, error):
+        # time_forward_start=time.clock()
         p = self._get_priority(error)
         self.tree[net].update(tree_idx, p)
+        # time_forward_end=time.clock()
+        # print('update time is:',time_forward_end-time_forward_start)
 
 
 
@@ -810,8 +835,18 @@ class Prioritized_Replay_Buffer:
             batch_tree_idxs.append(idx)
 
         sampling_probabilities = priorities / self.tree[net].total()
+        # print('len(index_refs) is',len(self.index_refs[net]))
+        # print('sum(priorities)',sum(priorities))
+        # print('self.tree[net].total():',self.tree[net].total())
+        # print('priorities:',priorities)
+        # print('len(priorities):',len(priorities))
+        # print('sampling_probabilities:',sampling_probabilities)
+        # print('len(sampling_probabilities):', len(sampling_probabilities))
+        # print('sum(sampling_probabilities):',sum(sampling_probabilities))
         is_weight = np.power(self.tree[net].n_entries * sampling_probabilities, -self.beta)
+        # print('is_weight:',is_weight)
         is_weight /= is_weight.max()
+        # print(is_weight)
 
         return batch_idxs , is_weight, batch_tree_idxs
 
