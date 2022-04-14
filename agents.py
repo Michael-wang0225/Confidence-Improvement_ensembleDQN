@@ -132,17 +132,18 @@ class ensembleDQNAgent():
         # Ensemble_test_policy action selection
         info = {}
         action, policy_info = self.test_policy.select_action(q_values_all_nets=q_values_all_nets)
-        info['q_values_all_nets'] = q_values_all_nets
+        info['q_values_all_nets'] = q_values_all_nets[action]
+        # print(info['q_values_all_nets'])
         # info['mean']= np.mean(q_values_all_nets[:, :],axis=0)
-        info['mean'] = np.mean(q_values_all_nets, axis=0)
+        info['mean'] = np.mean(q_values_all_nets[action], axis=0)
         # print('mean of q_values_all_nets is',info['mean'])
-        info['standard_deviation'] = np.std(q_values_all_nets, axis=0)
+        info['standard_deviation'] = np.std(q_values_all_nets[action], axis=0)
         # print('standard_deviation is',info['standard_deviation'])
-        info['coefficient_of_variation'] = np.std(q_values_all_nets, axis=0) / np.abs(info['mean'])
+        info['coefficient_of_variation'] = np.std(q_values_all_nets[action], axis=0) / np.abs(info['mean'])
 
         # print('coefficient_of_variation is',info['coefficient_of_variation'])
         info.update(policy_info)  # fallback action: True or False
-        # print('fallback action is',info['fallback action'])
+        # print('fallback_action is',info['fallback_action'])
 
         return action, info
 
@@ -169,7 +170,7 @@ class ensembleDQNAgent():
         return error
 
 
-    def step(self, state, next_state, action, reward, done, coef_of_var, active_model):
+    def step(self, state, next_state, action, reward, done, is_collided, coef_of_var, active_model):
 
         # if self.update_step % 1000 ==0:
         #     print('\n{:d} steps passed...\n'.format(self.update_step))
@@ -179,7 +180,7 @@ class ensembleDQNAgent():
             # Save experience in replay memory
             self.memory.append(state, action, reward, done, coef_of_var, error)
         else:
-            self.memory.append(state, action, reward, done, coef_of_var)
+            self.memory.append(state, action, reward, done, is_collided, coef_of_var)
         if self.enough_samples == False:
             has_enough_data = [False for i in range(number_of_nets)]
             flag = True
@@ -255,9 +256,9 @@ class ensembleDQNAgent():
                     self.memory.update(active_net, tree_idx, errors[i])
             else:
                 # time_forward_start=time.clock()
-                if self.update_step % 3000 == 0:
+                if self.update_step % 1000 == 0: # cv update frequency
                     self.update_cv_based_priority(active_net, batch_tree_idxs, state_batch, action_batch)
-                    print('priority updated...')
+                    # print('priority updated...')
                 # time_forward_end=time.clock()
                 # print('cv update time is:',time_forward_end-time_forward_start)
         else:
@@ -373,18 +374,13 @@ class Confidence_Based_Replay_Buffer:
         self.states = deque(maxlen=buffer_size)
         # self.coef_of_vars = deque(maxlen=buffer_size)
         self.priorities = deque(maxlen=buffer_size)
-        ######################################################
-        # append some big values in the Cv value list,to check if the update function goes well
-        # for i in range(4):
-        #     self.coef_of_vars.append(1000)
-        ######################################################
     def _get_priority(self, error):
         return (np.abs(error) + self.PER_e) ** self.PER_a
 
-    def append(self, state, action, reward, done, coef_of_var):
+    def append(self, state, action, reward, done, is_collided, coef_of_var):
 
 
-        # #####################################################################################################
+        #####################################################################################################
         # intent of self.index_refs will be created
         if self.nb_entries < self.limit:   # One more entry will be added after this loop
             # There should be enough experiences before the chosen sample to fill the window length + 1, windows length: How many historic states to include (1 uses only current state)
@@ -409,7 +405,13 @@ class Confidence_Based_Replay_Buffer:
         #     self.priorities.append(self._get_priority(2))
         ######################################################################################
         # version 02: directly append all the original cv values, but every 5000 steps the priority will be updated
-        self.priorities.append(self._get_priority(coef_of_var))
+        if is_collided== True:
+            # print('collided, cv will be added with 100 before calculating priority')
+            # print('without adding 100, priority is',self._get_priority(coef_of_var))
+            # print('with adding 100 , priority is',self._get_priority(coef_of_var + 100))
+            self.priorities.append(self._get_priority(coef_of_var + 100))
+        else:
+            self.priorities.append(self._get_priority(coef_of_var))
         ####################################################################################################
 
 
@@ -997,6 +999,6 @@ class Ensemble_test_policy():
             while i<len(coef_of_var) and coef_of_var[sorted_q_indexes[i]] > self.safety_threshold:
                 i+=1
             if i == len(coef_of_var):  # No action is considered safe - use fallback action
-                return self.fallback_action, {'fallback action': True}
+                return self.fallback_action, {'fallback_action': True}
             else:
-                return sorted_q_indexes[i], {'fallback action': False}
+                return sorted_q_indexes[i], {'fallback_action': False}

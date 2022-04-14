@@ -57,17 +57,19 @@ if __name__ == "__main__":
         while True:
             action, coef_of_var= agent.act_train(state, active_model)
             next_state, reward, done, is_collided = env.step(actions[action])
-            agent.step(state, next_state, action, reward, done, coef_of_var, active_model)
+            agent.step(state, next_state, action, reward, done, is_collided, coef_of_var, active_model)
             state = next_state
             score += reward
             step += 1
             total_step +=1
             if is_collided == True:
                 num_collision += 1
-            ################################################################## test the possibility distribution,save in a additional csv file
-            # with open("transition_prob_CBRB.csv", 'a+', newline='') as f:
-            #     mywrite = csv.writer(f)
-            #     mywrite.writerow(agent.memory.sample_transition_prob)
+            ################################################################## test the priority distribution,save in a additional csv file
+            # if total_step >= 100000 and (total_step % 2000) ==0: # 每2000 step 记录一次priority情况，不然csv文件过于大
+            #     print(total_step)
+            #     with open("F:\\priority csv\\priority_CBRB_update_step_ 500.csv", 'a+', newline='') as f:
+            #         mywrite = csv.writer(f)
+            #         mywrite.writerow(agent.memory.priorities)
             ###################################################################
             # save agent and loss logs
             write_logs(file_path=path["agent_log_path"],
@@ -77,9 +79,15 @@ if __name__ == "__main__":
             if done:
                 break
 
-        # scores.append(score)
         scores_window.append(score)
         num_collision_window.append(num_collision)
+        # ################################################################## test the priority distribution,save in a additional csv file
+        if (episode+1) % 5000 == 0:  # 每5000 episode 记录一次priority情况，不然csv文件过于大
+            print('priority in episode {:d} saved',episode+1)
+            with open("F:\\priority csv\\priority_CBRB_cv_update_1000_with_collided.csv", 'a+', newline='') as f:
+                mywrite = csv.writer(f)
+                mywrite.writerow(agent.memory.priorities)
+        # ###################################################################
         if episode <=99:
             write_logs(file_path=path["agent_log_path"],
                        data=[total_step, episode, step, state, actions[action], next_state, reward, score, agent.policy.eps,
@@ -98,8 +106,6 @@ if __name__ == "__main__":
                 torch.save(agent.qnetworks_local[i].state_dict(),
                            os.path.join(path["model_path"], "checkpoint_episode_" + str(episode) + "_score_{:.2f}".format(
                                np.mean(scores_window)) + "_ensemble_"+ str(i) +".pth"))
-        # if total_step >= 500:
-        #     break
 
         if np.mean(scores_window) > 250 and episode >= 100:
             print('\nSave weights in {:d} episodes!\tAverage Score: {:.2f}'.format(episode +1,
@@ -108,7 +114,7 @@ if __name__ == "__main__":
                 torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "High_score_checkpoint_episode_"+ str(episode) + "_score_{:.2f}".format(
                                np.mean(scores_window)) +"_ensemble_"+ str(i) +".pth"))
 
-        if episode >= 99 and (1 - (num_collision_window[99] - num_collision_window[0]) / 100) >= 0.9:
+        if episode >= 99 and (1 - (num_collision_window[99] - num_collision_window[0]) / 100) >= 0.93:
             print('\nSave weights in {:d} episodes!\tSuccess rate per 100 episodes: {:.2f}'.format(episode + 1,
                                                                                    1 - (num_collision_window[99] - num_collision_window[0]) / 100))
             for i in range(number_of_nets):
@@ -118,14 +124,6 @@ if __name__ == "__main__":
         if episode >=40000:
             print('\nTrained {:d} episodes'.format(episode +1))
             break
-
-
-        # if np.mean(scores_window) > 350 and episode >= 100:
-        #     print('\nEnvironment solved in {:d} episodes!\tAverage Score: {:.2f}'.format(episode +1,
-        #                                                                                  np.mean(scores_window)))
-        #     for i in range(number_of_nets):
-        #         torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "Final_checkpoint_episode_"+ str(episode) +"_ensemble_"+ str(i) +".pth"))
-        #     break
 
     print("\nTraining ended.")
 
