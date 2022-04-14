@@ -3,7 +3,7 @@ import random
 from collections import namedtuple, deque
 import warnings
 
-from models import QNetwork
+from models import QNetwork, ModelWithPrior
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +19,7 @@ TAU = 1e-3  # for soft update of target parameters
 LR = 5e-4  # learning rate
 UPDATE_EVERY = 4  # how often to update the network
 number_of_nets = 10 # number of ensemble member
+cv_update_frequency = 500
 
 
 
@@ -28,7 +29,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class ensembleDQNAgent():
     """Interacts with and learns from the environment."""
 
-    def __init__(self, state_size, action_size, memory, train_policy, test_policy, seed):
+    def __init__(self, state_size, action_size, memory, train_policy, test_policy, seeds):
         """Initialize an Agent object.
         
         Params
@@ -39,7 +40,7 @@ class ensembleDQNAgent():
         """
         self.state_size = state_size
         self.action_size = action_size
-        self.seed = random.seed(seed)
+        self.seed = random.seed(seeds[0])
 
 
         self.normal_buffer = False
@@ -48,8 +49,8 @@ class ensembleDQNAgent():
 
         self.loss = []
         # initialize 10 ensemble members, so 10 local networks and 10 target networks.
-        self.qnetworks_local = [ QNetwork(state_size, action_size, seed).to(device) for i in range(number_of_nets)]
-        self.qnetworks_target = [ QNetwork(state_size, action_size, seed).to(device) for i in range(number_of_nets)]
+        self.qnetworks_local = [ QNetwork(state_size, action_size, seeds[i]).to(device) for i in range(number_of_nets)]
+        self.qnetworks_target = [ QNetwork(state_size, action_size, seeds[i]).to(device) for i in range(number_of_nets)]
         self.optimizer = [ optim.Adam(self.qnetworks_local[i].parameters(), lr=LR) for i in range(number_of_nets)]
         # print(self.optimizer)
 
@@ -256,7 +257,7 @@ class ensembleDQNAgent():
                     self.memory.update(active_net, tree_idx, errors[i])
             else:
                 # time_forward_start=time.clock()
-                if self.update_step % 1000 == 0: # cv update frequency
+                if self.update_step % cv_update_frequency == 0: # cv update frequency
                     self.update_cv_based_priority(active_net, batch_tree_idxs, state_batch, action_batch)
                     # print('priority updated...')
                 # time_forward_end=time.clock()
@@ -340,7 +341,7 @@ class ensembleDQNAgent():
 class Confidence_Based_Replay_Buffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, buffer_size, batch_size, seed, number_of_nets=number_of_nets, adding_prob=0.5):
+    def __init__(self, action_size, buffer_size, batch_size, seeds, number_of_nets=number_of_nets, adding_prob=0.5):
         """Initialize a ReplayBuffer object.
         Params
         ======
@@ -352,7 +353,7 @@ class Confidence_Based_Replay_Buffer:
         self.action_size = action_size
         self.batch_size = batch_size
 
-        self.seed = random.seed(seed)
+        self.seed = random.seed(seeds[0])
 
         self.type ='Confidence_Based_Replay_Buffer'
 
@@ -405,6 +406,10 @@ class Confidence_Based_Replay_Buffer:
         #     self.priorities.append(self._get_priority(2))
         ######################################################################################
         # version 02: directly append all the original cv values, but every 5000 steps the priority will be updated
+        # cv without collided
+        # self.priorities.append(self._get_priority(coef_of_var))
+        ####################################################################################################
+        # cv with collided
         if is_collided== True:
             # print('collided, cv will be added with 100 before calculating priority')
             # print('without adding 100, priority is',self._get_priority(coef_of_var))
@@ -412,8 +417,6 @@ class Confidence_Based_Replay_Buffer:
             self.priorities.append(self._get_priority(coef_of_var + 100))
         else:
             self.priorities.append(self._get_priority(coef_of_var))
-        ####################################################################################################
-
 
     def sample_batch_idxs(self, net, batch_size):
         """
@@ -582,7 +585,7 @@ class Confidence_Based_Replay_Buffer:
 class Replay_Buffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, buffer_size, batch_size, seed, number_of_nets=number_of_nets, adding_prob=0.5):
+    def __init__(self, action_size, buffer_size, batch_size, seeds, number_of_nets=number_of_nets, adding_prob=0.5):
         """Initialize a ReplayBuffer object.
         Params
         ======
@@ -594,7 +597,7 @@ class Replay_Buffer:
         self.action_size = action_size
         self.batch_size = batch_size
 
-        self.seed = random.seed(seed)
+        self.seed = random.seed(seeds[0])
 
         self.type='Replay_Buffer'
 
@@ -721,7 +724,7 @@ class Replay_Buffer:
 class Prioritized_Replay_Buffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, buffer_size, batch_size, seed, number_of_nets=number_of_nets, adding_prob=0.5):
+    def __init__(self, action_size, buffer_size, batch_size, seeds, number_of_nets=number_of_nets, adding_prob=0.5):
         """Initialize a ReplayBuffer object.
         Params
         ======
@@ -733,7 +736,7 @@ class Prioritized_Replay_Buffer:
         self.action_size = action_size
         self.batch_size = batch_size
 
-        self.seed = random.seed(seed)
+        self.seed = random.seed(seeds[0])
 
         self.type='Prioritized_Replay_Buffer'
 

@@ -31,21 +31,23 @@ if __name__ == "__main__":
     number_of_nets = 10
     safety_threshold = 2
     fallback_action = 0
+    seeds = [i for i in range(10)]
     # Replay memory
-    memory_CBRB = Confidence_Based_Replay_Buffer(action_size=len(actions), buffer_size =BUFFER_SIZE, batch_size=BATCH_SIZE, seed=0)
-    memory_RB = Replay_Buffer(action_size=len(actions), buffer_size =BUFFER_SIZE, batch_size=BATCH_SIZE, seed=0)
-    memory_PERB = Prioritized_Replay_Buffer(action_size=len(actions), buffer_size =BUFFER_SIZE, batch_size=BATCH_SIZE, seed=0)
+    memory_CBRB = Confidence_Based_Replay_Buffer(action_size=len(actions), buffer_size =BUFFER_SIZE, batch_size=BATCH_SIZE, seeds=seeds)
+    memory_RB = Replay_Buffer(action_size=len(actions), buffer_size =BUFFER_SIZE, batch_size=BATCH_SIZE, seeds=seeds)
+    memory_PERB = Prioritized_Replay_Buffer(action_size=len(actions), buffer_size =BUFFER_SIZE, batch_size=BATCH_SIZE, seeds=seeds)
     # Identify policy
     train_policy=Epsilon_greedy_policy(action_size=len(actions))
     test_policy=Ensemble_test_policy(saftety_threshold=None, fallback_action=None)
     # generate models
-    agent=ensembleDQNAgent(state_size=len(state), action_size=len(actions), memory=memory_CBRB,train_policy=train_policy, test_policy=test_policy, seed=0)
+    agent=ensembleDQNAgent(state_size=len(state), action_size=len(actions), memory=memory_CBRB,train_policy=train_policy, test_policy=test_policy, seeds=seeds)
 
     write_logs(file_path=path["agent_log_path"],
                data=["total_step", "episode", "step", "state", "action", "next state", "reward", "return", "epsilon", "done","is_collided", "num_collision", "coef_of_var", "average score","success_rate"])
     write_logs(file_path=path["loss_log_path"],
                data=["loss"])
     print("\nstart training " + agent_type + " agent:\n")
+    print('initialize 10 different weights with different seeds')
     # run episode
     for episode in episodes:
         active_model = np.random.randint(number_of_nets) # choose a arbitrary active model from models [0,10)
@@ -81,13 +83,13 @@ if __name__ == "__main__":
 
         scores_window.append(score)
         num_collision_window.append(num_collision)
-        # ################################################################## test the priority distribution,save in a additional csv file
+        ################################################################## test the priority distribution,save in a additional csv file
         if (episode+1) % 5000 == 0:  # 每5000 episode 记录一次priority情况，不然csv文件过于大
-            print('priority in episode {:d} saved',episode+1)
-            with open("F:\\priority csv\\priority_CBRB_cv_update_1000_with_collided.csv", 'a+', newline='') as f:
+            print('priority in episode {:d} saved'.format(episode+1))
+            with open("F:\\priority csv\\priority_CBRB_cv_update_500_with_collided_different_seeds.csv", 'a+', newline='') as f:
                 mywrite = csv.writer(f)
                 mywrite.writerow(agent.memory.priorities)
-        # ###################################################################
+        ###################################################################
         if episode <=99:
             write_logs(file_path=path["agent_log_path"],
                        data=[total_step, episode, step, state, actions[action], next_state, reward, score, agent.policy.eps,
@@ -131,5 +133,5 @@ if __name__ == "__main__":
     time_cost = end_time - start_time
     print('cost time: ',str(time_cost).split('.')[0])
 
-    # plot_scores([i for i in range(episode + 1)], scores, average=100, path=path["graph_path"])
+
     env.close()
