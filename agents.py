@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from SumTree import SumTree
 import time
-import dgl
+import math
 import csv
 
 
@@ -49,8 +49,11 @@ class ensembleDQNAgent():
 
         self.loss = []
         # initialize 10 ensemble members, so 10 local networks and 10 target networks.
-        self.qnetworks_local = [ QNetwork(state_size, action_size, seeds[i]).to(device) for i in range(number_of_nets)]
-        self.qnetworks_target = [ QNetwork(state_size, action_size, seeds[i]).to(device) for i in range(number_of_nets)]
+        self.qnetworks_local = [QNetwork(state_size=state_size, action_size=action_size, seed=seeds[i]).to(device)for i in range(number_of_nets)]
+        self.qnetworks_target = [QNetwork(state_size=state_size, action_size=action_size, seed=seeds[i]).to(device) for i in range(number_of_nets)]
+
+        # self.qnetworks_local = [ ModelWithPrior(state_size=state_size, action_size=action_size, seed= seeds[i]).to(device) for i in range(number_of_nets)]
+        # self.qnetworks_target = [ ModelWithPrior(state_size=state_size, action_size=action_size, seed= seeds[i]).to(device) for i in range(number_of_nets)]
         self.optimizer = [ optim.Adam(self.qnetworks_local[i].parameters(), lr=LR) for i in range(number_of_nets)]
         # print(self.optimizer)
 
@@ -69,6 +72,7 @@ class ensembleDQNAgent():
             print('\nusing '+ self.memory.type)
         self.batch_size = self.memory.batch_size
         print('Buffer size is',self.memory.limit)
+        print('Batch Size is',self.memory.batch_size)
         # Initialize time step (for updating every UPDATE_EVERY steps)
         self.t_step = 0
         # Initialize update step for updating cv value
@@ -180,8 +184,10 @@ class ensembleDQNAgent():
             error= self.calulate_TD_error(state, next_state, action, reward, done, active_model)
             # Save experience in replay memory
             self.memory.append(state, action, reward, done, coef_of_var, error)
-        else:
+        elif self.confidence_based:
             self.memory.append(state, action, reward, done, is_collided, coef_of_var)
+        else:
+            self.memory.append(state, action, reward, done, coef_of_var)
         if self.enough_samples == False:
             has_enough_data = [False for i in range(number_of_nets)]
             flag = True
@@ -255,10 +261,12 @@ class ensembleDQNAgent():
                 for i in range(self.batch_size):
                     tree_idx = batch_tree_idxs[i]
                     self.memory.update(active_net, tree_idx, errors[i])
-            else:
+            # else:
                 # time_forward_start=time.clock()
-                if self.update_step % cv_update_frequency == 0: # cv update frequency
-                    self.update_cv_based_priority(active_net, batch_tree_idxs, state_batch, action_batch)
+                ############################################################################################################## cv update process
+                # if self.update_step % cv_update_frequency == 0: # cv update frequency
+                #     self.update_cv_based_priority(active_net, batch_tree_idxs, state_batch, action_batch)
+                ##############################################################################################################
                     # print('priority updated...')
                 # time_forward_end=time.clock()
                 # print('cv update time is:',time_forward_end-time_forward_start)
@@ -277,23 +285,16 @@ class ensembleDQNAgent():
 
 
     def update_cv_based_priority(self, active_net, batch_tree_idxs, state_batch, action_batch):
-        # time_forward_start=time.clock()
         for i in range(len(batch_tree_idxs)):
-            # time_forward_start=time.clock()
             state = state_batch[i]
             action = action_batch[i]
-            # time_forward_start=time.clock()
             new_cv_value = self.forward_cv_value(state, action)
-            # time_forward_end=time.clock()
-            # print('cv calculate time is:',time_forward_end-time_forward_start)
-            # print(new_cv_value)
+            # speed_difference = np.abs(state[0] - state[1])  # state[0] = ego speed, state[1] = 最近的vehicle speed
+            # distance_difference = math.sqrt((state[5] - state[7]) ** 2 + (state[6] - state[8]) ** 2)  # state{5} ego x axis, state[6] ego y axis, state[7] = vehicle x axis, state[8] = vehicle y axis
+            # self._get_risk_priority(speed_difference, distance_difference, is_collided) + coef_of_var
             tree_idx = batch_tree_idxs[i]
-            # time_forward_start=time.clock()
             self.memory.update(active_net, tree_idx, new_cv_value)
-            # time_forward_end=time.clock()
-            # print('one loop time is:',time_forward_end-time_forward_start)
-        # time_forward_end=time.clock()
-        # print('update cv time is:',time_forward_end-time_forward_start)
+
     def forward_cv_value(self, state, action):
         """Returns the coefficient of variation for given state and action.
 
@@ -378,6 +379,19 @@ class Confidence_Based_Replay_Buffer:
     def _get_priority(self, error):
         return (np.abs(error) + self.PER_e) ** self.PER_a
 
+    def _get_risk_priority(self, speed_difference, distance_difference,is_collided):
+        if is_collided== True:
+            # print('collided, priority append 500')
+            # print('distance_diff is',distance_difference)
+            return 500
+        elif distance_difference <=6:
+            # print('risky, priority append', 10 * speed_difference + 50 / (distance_difference))
+            return 10*speed_difference + 50/distance_difference
+        else:
+            # print('not risky, priority append', 0.01*speed_difference + 1/(distance_difference))
+            return 0.01*speed_difference + 10/distance_difference
+
+
     def append(self, state, action, reward, done, is_collided, coef_of_var):
 
 
@@ -407,16 +421,18 @@ class Confidence_Based_Replay_Buffer:
         ######################################################################################
         # version 02: directly append all the original cv values, but every 5000 steps the priority will be updated
         # cv without collided
+        speed_difference = np.abs(state[0]-state[1]) # state[0] = ego speed, state[1] = 最近的vehicle speed
+        distance_difference = math.sqrt((state[5]-state[7])**2 + (state[6] - state[8])**2) # state{5} ego x axis, state[6] ego y axis, state[7] = vehicle x axis, state[8] = vehicle y axis
+        # self.priorities.append(self._get_risk_priority(speed_difference,distance_difference,is_collided))
+        self.priorities.append(self._get_priority(self._get_risk_priority(speed_difference, distance_difference, is_collided)+coef_of_var))
+        # print(self.priorities)
         # self.priorities.append(self._get_priority(coef_of_var))
         ####################################################################################################
         # cv with collided
-        if is_collided== True:
-            # print('collided, cv will be added with 100 before calculating priority')
-            # print('without adding 100, priority is',self._get_priority(coef_of_var))
-            # print('with adding 100 , priority is',self._get_priority(coef_of_var + 100))
-            self.priorities.append(self._get_priority(coef_of_var + 100))
-        else:
-            self.priorities.append(self._get_priority(coef_of_var))
+        # if is_collided== True:
+        #     self.priorities.append(self._get_priority(coef_of_var + 100))
+        # else:
+        #     self.priorities.append(self._get_priority(coef_of_var))
 
     def sample_batch_idxs(self, net, batch_size):
         """
@@ -604,13 +620,19 @@ class Replay_Buffer:
         self.limit= buffer_size
         self.number_of_nets = number_of_nets
         self.adding_prob = adding_prob
+        self.PER_e = 0.01  # Hyperparameter that we use to avoid some experiences to have 0 probability of being taken
+        self.PER_a = 0.6  # Hyperparameter that we use to make a tradeoff between taking only experience with high priority and sampling randomly
         self.index_refs = [[] for i in range(self.number_of_nets)]
 
         self.actions = deque(maxlen=buffer_size)
         self.rewards = deque(maxlen=buffer_size)
         self.dones = deque(maxlen=buffer_size)
         self.states = deque(maxlen=buffer_size)
-        self.coef_of_vars = deque(maxlen=buffer_size)
+        # self.coef_of_vars = deque(maxlen=buffer_size)
+        self.priorities = deque(maxlen=buffer_size)
+
+    def _get_priority(self, error):
+        return (np.abs(error) + self.PER_e) ** self.PER_a
 
     def append(self, state, action, reward, done, coef_of_var):
 
@@ -625,7 +647,8 @@ class Replay_Buffer:
         self.actions.append(action)
         self.rewards.append(reward)
         self.dones.append(done)
-        self.coef_of_vars.append(coef_of_var)
+        # self.coef_of_vars.append(coef_of_var)
+        self.priorities.append(self._get_priority(coef_of_var))
 
     def sample_batch_idxs(self, net, batch_size):
         """
