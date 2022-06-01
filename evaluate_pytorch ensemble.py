@@ -5,6 +5,9 @@ import torch
 from utils import get_options, set_path, write_logs, plot_scores
 import os
 import datetime
+from models import QNetwork
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 if __name__ == "__main__":
     options = get_options("eval")
@@ -20,23 +23,26 @@ if __name__ == "__main__":
     number_of_nets = 10
     BUFFER_SIZE = 100000  # buffer size
     BATCH_SIZE = 64  # minibatch size
+    seeds = [i for i in range(number_of_nets)]
     score = 0
     scores = []
     num_collision = 0
     total_step = 0
     # Replay memory
-    memory_CBRB = Confidence_Based_Replay_Buffer(action_size=len(actions), buffer_size=BUFFER_SIZE,batch_size=BATCH_SIZE, seed=0)
-    memory_RB = Replay_Buffer(action_size=len(actions), buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, seed=0)
-    memory_PERB = Prioritized_Replay_Buffer(action_size=len(actions), buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE,seed=0)
+    memory_CBRB = Confidence_Based_Replay_Buffer(action_size=len(actions), buffer_size=BUFFER_SIZE,batch_size=BATCH_SIZE, seeds=seeds)
+    memory_RB = Replay_Buffer(action_size=len(actions), buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE, seeds=seeds)
+    memory_PERB = Prioritized_Replay_Buffer(action_size=len(actions), buffer_size=BUFFER_SIZE, batch_size=BATCH_SIZE,seeds=seeds)
     # Identify policy
     train_policy = Epsilon_greedy_policy(action_size=len(actions))
     test_policy = Ensemble_test_policy(saftety_threshold=None, fallback_action=None)
     # generate models
-    agent = ensembleDQNAgent(state_size=len(state), action_size=len(actions), memory=memory_CBRB, train_policy=train_policy, test_policy=test_policy, seed=0)
+    agent = ensembleDQNAgent(state_size=len(state), action_size=len(actions), memory=memory_CBRB, train_policy=train_policy, test_policy=test_policy, seeds=seeds)
     # load weights
     for i in range(number_of_nets):
-        agent.qnetworks_local[i].load_state_dict(torch.load(os.getcwd() +"\\results\\ensembleDQN_model\\models\\High_score_checkpoint_episode_17923_score_315.13_ensemble_"+ str(i) + ".pth"))
+        agent.qnetworks_local[i].load_state_dict(torch.load(os.getcwd() +"\\results\\ensembleDQN_model\\models\\checkpoint_episode_40000_score_-405.43_ensemble_"+ str(i) + ".pth"))
         # agent.qnetworks_local[i].load_state_dict(torch.load(path["model_path"] + str(i) + ".pth"))
+    # initial arbitary weights
+    # agent.qnetworks_local= [QNetwork(state_size=len(state), action_size=len(actions), seed=seeds[i]).to(device) for i in range(number_of_nets)]
 
 
 
@@ -45,7 +51,7 @@ if __name__ == "__main__":
     write_logs(file_path=path["score_log_path"],
                data=["episode", "return"])
     print("\nstart evaluation of " + agent_type + " agent:\n")
-    print('cv update 1000, High_score_checkpoint_episode_17923_score_315.13')
+    # print('cv+risk new map, High_success_rate_checkpoint_episode_33625_success_rate_0.8900_ensemble')
     # run evaluation
     for episode in episodes:
         score = 0

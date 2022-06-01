@@ -1,6 +1,6 @@
-import pandas as pd
+import time
 
-from sumo_env import SumoEnv
+from sumo_env_6_lane import SumoEnv
 from agents import ensembleDQNAgent, Confidence_Based_Replay_Buffer, Replay_Buffer,Prioritized_Replay_Buffer, Epsilon_greedy_policy, Ensemble_test_policy
 from utils import get_options, set_path, write_logs, plot_scores
 import os
@@ -14,6 +14,8 @@ if __name__ == "__main__":
     options = get_options("train")
     agent_type = options.agent
     path = set_path(agent_type)
+    print(time.strftime("%Y%m%d-%H%M%S"))
+    print('training..newmap_cv+risk')
     # start sumo env
     env = SumoEnv(mode="train", log_path=path["log_path"], nogui=options.nogui)
     state = env.start()
@@ -31,7 +33,7 @@ if __name__ == "__main__":
     number_of_nets = 10
     safety_threshold = 2
     fallback_action = 0
-    seeds = [i for i in range(10)]
+    seeds = [i for i in range(number_of_nets)]
     # Replay memory
     memory_CBRB = Confidence_Based_Replay_Buffer(action_size=len(actions), buffer_size =BUFFER_SIZE, batch_size=BATCH_SIZE, seeds=seeds)
     memory_RB = Replay_Buffer(action_size=len(actions), buffer_size =BUFFER_SIZE, batch_size=BATCH_SIZE, seeds=seeds)
@@ -47,7 +49,6 @@ if __name__ == "__main__":
     write_logs(file_path=path["loss_log_path"],
                data=["loss"])
     print("\nstart training " + agent_type + " agent:\n")
-    print('initialize 10 different weights with different seeds')
     # run episode
     for episode in episodes:
         active_model = np.random.randint(number_of_nets) # choose a arbitrary active model from models [0,10)
@@ -85,8 +86,8 @@ if __name__ == "__main__":
         num_collision_window.append(num_collision)
         ################################################################## test the priority distribution,save in a additional csv file
         if (episode+1) % 5000 == 0:  # 每5000 episode 记录一次priority情况，不然csv文件过于大
-            print('priority in episode {:d} saved'.format(episode+1))
-            with open("F:\\priority csv\\priority_CBRB_cv_update_500_with_collided_different_seeds.csv", 'a+', newline='') as f:
+            print('priority in episode {:d} saved'.format(episode+1)) #priority_CBRB_cv_update_500_with_collided_different_weights_newmap_18042022.csv
+            with open("F:\\priority csv\\priority_cv_risk_newmap__06052022.csv", 'a+', newline='') as f:
                 mywrite = csv.writer(f)
                 mywrite.writerow(agent.memory.priorities)
         ###################################################################
@@ -109,14 +110,14 @@ if __name__ == "__main__":
                            os.path.join(path["model_path"], "checkpoint_episode_" + str(episode) + "_score_{:.2f}".format(
                                np.mean(scores_window)) + "_ensemble_"+ str(i) +".pth"))
 
-        if np.mean(scores_window) > 250 and episode >= 100:
+        if np.mean(scores_window) > 150 and episode >= 100:
             print('\nSave weights in {:d} episodes!\tAverage Score: {:.2f}'.format(episode +1,
                                                                                          np.mean(scores_window)))
             for i in range(number_of_nets):
                 torch.save(agent.qnetworks_local[i].state_dict(), os.path.join(path["model_path"], "High_score_checkpoint_episode_"+ str(episode) + "_score_{:.2f}".format(
                                np.mean(scores_window)) +"_ensemble_"+ str(i) +".pth"))
 
-        if episode >= 99 and (1 - (num_collision_window[99] - num_collision_window[0]) / 100) >= 0.93:
+        if episode >= 99 and (1 - (num_collision_window[99] - num_collision_window[0]) / 100) >= 0.85:
             print('\nSave weights in {:d} episodes!\tSuccess rate per 100 episodes: {:.2f}'.format(episode + 1,
                                                                                    1 - (num_collision_window[99] - num_collision_window[0]) / 100))
             for i in range(number_of_nets):

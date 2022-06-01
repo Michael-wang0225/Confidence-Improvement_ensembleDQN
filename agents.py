@@ -187,7 +187,7 @@ class ensembleDQNAgent():
         elif self.confidence_based:
             self.memory.append(state, action, reward, done, is_collided, coef_of_var)
         else:
-            self.memory.append(state, action, reward, done, coef_of_var)
+            self.memory.append(state, action, reward, done,is_collided, coef_of_var)
         if self.enough_samples == False:
             has_enough_data = [False for i in range(number_of_nets)]
             flag = True
@@ -223,13 +223,15 @@ class ensembleDQNAgent():
         action_batch = []
         done_batch = []
         next_state_batch = []
+        is_collided_batch = []
         for e in experiences:
             state_batch.append(e.state)
             next_state_batch.append(e.next_state)
             reward_batch.append(e.reward)
             action_batch.append(e.action)
             done_batch.append(1. if e.done else 0.)
-
+            is_collided_batch.append(e.is_collided)
+        # print(is_collided_batch)
         state_batch=torch.FloatTensor(state_batch).to(device)
         next_state_batch=torch.FloatTensor(next_state_batch).to(device)
         reward_batch=torch.FloatTensor(reward_batch).to(device)
@@ -261,11 +263,11 @@ class ensembleDQNAgent():
                 for i in range(self.batch_size):
                     tree_idx = batch_tree_idxs[i]
                     self.memory.update(active_net, tree_idx, errors[i])
-            # else:
+            else:
                 # time_forward_start=time.clock()
                 ############################################################################################################## cv update process
-                # if self.update_step % cv_update_frequency == 0: # cv update frequency
-                #     self.update_cv_based_priority(active_net, batch_tree_idxs, state_batch, action_batch)
+                if self.update_step % cv_update_frequency == 0: # cv update frequency
+                    self.update_cv_based_priority(active_net, batch_tree_idxs, state_batch, action_batch, is_collided_batch)
                 ##############################################################################################################
                     # print('priority updated...')
                 # time_forward_end=time.clock()
@@ -284,16 +286,14 @@ class ensembleDQNAgent():
         # print('one loop time is:',time_forward_end-time_forward_start)
 
 
-    def update_cv_based_priority(self, active_net, batch_tree_idxs, state_batch, action_batch):
+    def update_cv_based_priority(self, active_net, batch_tree_idxs, state_batch, action_batch, is_collided_batch):
         for i in range(len(batch_tree_idxs)):
             state = state_batch[i]
             action = action_batch[i]
+            is_collided = is_collided_batch[i]
             new_cv_value = self.forward_cv_value(state, action)
-            # speed_difference = np.abs(state[0] - state[1])  # state[0] = ego speed, state[1] = 最近的vehicle speed
-            # distance_difference = math.sqrt((state[5] - state[7]) ** 2 + (state[6] - state[8]) ** 2)  # state{5} ego x axis, state[6] ego y axis, state[7] = vehicle x axis, state[8] = vehicle y axis
-            # self._get_risk_priority(speed_difference, distance_difference, is_collided) + coef_of_var
             tree_idx = batch_tree_idxs[i]
-            self.memory.update(active_net, tree_idx, new_cv_value)
+            self.memory.update(active_net, tree_idx, state, is_collided, new_cv_value)
 
     def forward_cv_value(self, state, action):
         """Returns the coefficient of variation for given state and action.
@@ -374,6 +374,7 @@ class Confidence_Based_Replay_Buffer:
         self.rewards = deque(maxlen=buffer_size)
         self.dones = deque(maxlen=buffer_size)
         self.states = deque(maxlen=buffer_size)
+        self.is_collided = deque(maxlen=buffer_size)
         # self.coef_of_vars = deque(maxlen=buffer_size)
         self.priorities = deque(maxlen=buffer_size)
     def _get_priority(self, error):
@@ -411,6 +412,7 @@ class Confidence_Based_Replay_Buffer:
         self.actions.append(action)
         self.rewards.append(reward)
         self.dones.append(done)
+        self.is_collided.append(is_collided)
         # self.coef_of_vars.append(coef_of_var)
         ######################################################################################
         # version 01: if cv bigger than 1, append 2. Otherwise append the original cv values
@@ -537,7 +539,7 @@ class Confidence_Based_Replay_Buffer:
 
         # This is to be understood as a transition: Given `state0`, performing `action`
         # yields `reward` and results in `state1`, which might be `terminal`.
-        Experience = namedtuple('Experience', 'state, action, reward, next_state, done')
+        Experience = namedtuple('Experience', 'state, action, reward, next_state, done, is_collided')
 
         # Sample random indexes for the specified ensemble member
         batch_idxs, importance_sample_weights, batch_tree_idxs = self.sample_batch_idxs(net, batch_size)
@@ -566,6 +568,7 @@ class Confidence_Based_Replay_Buffer:
             action = self.actions[idx - 1]
             reward = self.rewards[idx - 1]
             terminal1 = self.dones[idx - 1]
+            is_collided = self.is_collided[idx -1]
 
             # Okay, now we need to create the follow-up state. This is state0 shifted on timestep
             # to the right. Again, we need to be careful to not include an observation from the next
@@ -576,16 +579,18 @@ class Confidence_Based_Replay_Buffer:
             assert len(state0) == 1
             assert len(state1) == len(state0)
             experiences.append(Experience(state=state0, action=action, reward=reward,
-                                          next_state=state1, done=terminal1))
+                                          next_state=state1, done=terminal1,is_collided=is_collided))
         assert len(experiences) == batch_size
         return experiences, importance_sample_weights, batch_tree_idxs
 
-    def update(self, net, tree_idx, error):
-        # time_forward_start=time.clock()
-        p = self._get_priority(error)
+    def update(self, net, tree_idx, state, is_collided, new_cv_value):
+        state = state.cpu().numpy() # tensor转换成numpy
+        speed_difference = np.abs(state[0] - state[1])  # state[0] = ego speed, state[1] = 最近的vehicle speed
+        distance_difference = math.sqrt((state[5] - state[7]) ** 2 + (state[6] - state[8]) ** 2)  # state{5} ego x axis, state[6] ego y axis, state[7] = vehicle x axis, state[8] = vehicle y axis
+        # p = self._get_priority(new_cv_value) # version: only cv update
+        p = self._get_priority(self._get_risk_priority(speed_difference, distance_difference, is_collided) + new_cv_value) # version: cv + risk priority update
         self.tree[net].update(tree_idx, p)
-        # time_forward_end=time.clock()
-        # print('update time is:',time_forward_end-time_forward_start)
+
 
 
 
@@ -628,13 +633,14 @@ class Replay_Buffer:
         self.rewards = deque(maxlen=buffer_size)
         self.dones = deque(maxlen=buffer_size)
         self.states = deque(maxlen=buffer_size)
+        self.is_collided = deque(maxlen=buffer_size)
         # self.coef_of_vars = deque(maxlen=buffer_size)
         self.priorities = deque(maxlen=buffer_size)
 
     def _get_priority(self, error):
         return (np.abs(error) + self.PER_e) ** self.PER_a
 
-    def append(self, state, action, reward, done, coef_of_var):
+    def append(self, state, action, reward, done,is_collided, coef_of_var):
 
         if self.nb_entries < self.limit:   # One more entry will be added after this loop
             # There should be enough experiences before the chosen sample to fill the window length + 1
@@ -647,6 +653,7 @@ class Replay_Buffer:
         self.actions.append(action)
         self.rewards.append(reward)
         self.dones.append(done)
+        self.is_collided.append(is_collided)
         # self.coef_of_vars.append(coef_of_var)
         self.priorities.append(self._get_priority(coef_of_var))
 
@@ -690,7 +697,7 @@ class Replay_Buffer:
 
         # This is to be understood as a transition: Given `state0`, performing `action`
         # yields `reward` and results in `state1`, which might be `terminal`.
-        Experience = namedtuple('Experience', 'state, action, reward, next_state, done')
+        Experience = namedtuple('Experience', 'state, action, reward, next_state, done, is_collided')
 
         # Sample random indexes for the specified ensemble member
         batch_idxs = self.sample_batch_idxs(net, batch_size)
@@ -718,6 +725,7 @@ class Replay_Buffer:
             action = self.actions[idx - 1]
             reward = self.rewards[idx - 1]
             terminal1 = self.dones[idx - 1]
+            is_collided = self.is_collided[idx -1]
 
             # Okay, now we need to create the follow-up state. This is state0 shifted on timestep
             # to the right. Again, we need to be careful to not include an observation from the next
@@ -728,7 +736,7 @@ class Replay_Buffer:
             assert len(state0) == 1
             assert len(state1) == len(state0)
             experiences.append(Experience(state=state0, action=action, reward=reward,
-                                          next_state=state1, done=terminal1))
+                                          next_state=state1, done=terminal1, is_collided=is_collided))
         assert len(experiences) == batch_size
         return experiences
 
